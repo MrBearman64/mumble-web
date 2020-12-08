@@ -6,6 +6,16 @@ import vad from 'voice-activity-detection'
 import DropStream from 'drop-stream'
 import { WorkerBasedMumbleClient } from './worker-client'
 
+
+/* Backlogging, as used in the VADVoiceHandler, seems to be responsible for extreme audio glitches,
+ * when starting talking. This can be reproduced by speaking for a second, waiting until mumble-
+ * web Avatar is red again indicating that the user has stopped talking, and then speak again.
+ * 
+ * Simply disabling backlogging introduces possible audio clipping, when the user starts to talk, but
+ * it's considerably less annoying than previous audio glitches/stutters
+*/
+var bypassBacklogging = true
+
 class VoiceHandler extends Writable {
   constructor (client, settings) {
     super({ objectMode: true })
@@ -133,24 +143,32 @@ export class VADVoiceHandler extends VoiceHandler {
   }
 
   _write (data, _, callback) {
-    if (this._active && !this._mute) {
-      if (this._backlog.length > 0) {
-        for (let oldData of this._backlog) {
-          this._getOrCreateOutbound().write(oldData)
+    if (!bypassBacklogging){
+      if (this._active && !this._mute) {
+        if (this._backlog.length > 0) {
+          for (let oldData of this._backlog) {
+            this._getOrCreateOutbound().write(oldData)
+          }
+          this._backlog = []
+          this._backlogLength = 0
         }
-        this._backlog = []
-        this._backlogLength = 0
+        this._getOrCreateOutbound().write(data, callback)
+      } else {
+        // Make sure we always keep the backlog filled if we're not (yet) talking
+        this._backlog.push(data)
+        this._backlogLength += data.length
+        // Check if we can discard the oldest element without becoming too short
+        if (this._backlogLength - this._backlog[0].length > this._backlogLengthMin) {
+          this._backlogLength -= this._backlog.shift().length
+        }
+        callback()
       }
-      this._getOrCreateOutbound().write(data, callback)
     } else {
-      // Make sure we always keep the backlog filled if we're not (yet) talking
-      this._backlog.push(data)
-      this._backlogLength += data.length
-      // Check if we can discard the oldest element without becoming too short
-      if (this._backlogLength - this._backlog[0].length > this._backlogLengthMin) {
-        this._backlogLength -= this._backlog.shift().length
+      if (this._active && !this._mute) {
+        this._getOrCreateOutbound().write(data, callback)
+      } else {
+        callback()
       }
-      callback()
     }
   }
 
